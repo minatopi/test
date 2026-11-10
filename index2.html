@@ -1,0 +1,329 @@
+
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mini Zoom P2P</title>
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#18191c;color:white;font-family:Arial}
+header{padding:18px;background:#25262c;color:#4b9cff;font-size:22px;font-weight:bold}
+main{padding:18px;text-align:center}
+input{padding:13px;border:0;border-radius:8px;background:#30323a;color:white;margin:6px}
+button{padding:12px 17px;border:0;border-radius:8px;background:#2878ed;color:white;cursor:pointer;margin:5px}
+.red{background:#d93636}
+#videos{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin:20px auto}
+.card{position:relative;aspect-ratio:16/9;background:#292b31;border-radius:10px;overflow:hidden}
+video{width:100%;height:100%;object-fit:cover}
+.name{position:absolute;bottom:8px;left:8px;background:#0009;padding:6px;border-radius:5px}
+#meeting[hidden],#join[hidden]{display:none}
+#controls{position:fixed;bottom:0;background:#25262c;width:100%;padding:12px;text-align:center}
+#status{color:#aaa;margin:12px}
+</style>
+</head>
+<body>
+
+<header>Mini Zoom</header>
+
+<main>
+<div id="join">
+<h2>会議に参加</h2>
+<input id="username" placeholder="名前">
+<br>
+<input id="roomid" value="123456" placeholder="固定ルームID">
+<br>
+<button onclick="join()">会議に参加</button>
+</div>
+
+<div id="meeting" hidden>
+<h2>オンライン会議</h2>
+<div id="status">接続中...</div>
+<div id="videos">
+<div class="card">
+<video id="local" autoplay muted playsinline></video>
+<div class="name" id="myname">自分</div>
+</div>
+</div>
+</div>
+</main>
+
+<div id="controls" hidden>
+<button onclick="toggleMic()" id="mic">🎤 マイク</button>
+<button onclick="toggleCam()" id="cam">📷 カメラ</button>
+<button class="red" onclick="leave()">☎ 退室</button>
+</div>
+
+<script>
+const BROKER="wss://broker.emqx.io:8084/mqtt";
+const ICE={iceServers:[{urls:"stun:stun.l.google.com:19302"}]};
+
+let client,stream,room,myId,myName,joinedAt;
+let peers={};
+let micOn=true,camOn=true;
+
+const $=id=>document.getElementById(id);
+const compare=(a,b)=>{
+ return a.time-b.time || a.id.localeCompare(b.id);
+};
+
+function send(to,data){
+ client.publish(`minizoom/${room}/signal/${to}`,
+ JSON.stringify({from:myId,data}),{qos:0});
+}
+
+async function join(){
+ myName=$("username").value.trim()||"Guest";
+ room=$("roomid").value.trim();
+
+ if(!room)return alert("ルームIDを入力してください");
+ if(!window.mqtt)return alert("MQTTライブラリを読み込めません");
+
+ try{
+ stream=await navigator.mediaDevices.getUserMedia({
+  video:true,audio:true
+ });
+
+ $("local").srcObject=stream;
+ $("myname").textContent=myName;
+ $("join").hidden=true;
+ $("meeting").hidden=false;
+ $("controls").hidden=false;
+
+ myId="u"+Math.random().toString(36).slice(2,14);
+ joinedAt=Date.now();
+
+ const base=`minizoom/${room}`;
+ const presence=`${base}/presence/${myId}`;
+
+ client=mqtt.connect(BROKER,{
+  clientId:"mz"+myId,
+  clean:true,
+  connectTimeout:10000,
+  reconnectPeriod:3000,
+  will:{
+   topic:presence,
+   payload:"",
+   qos:0,
+   retain:true
+  }
+ });
+
+ client.on("connect",()=>{
+  $("status").textContent="MQTT接続完了・参加者を検索中";
+
+  client.subscribe([
+   `${base}/presence/+`,
+   `${base}/signal/${myId}`
+  ]);
+
+  client.publish(presence,JSON.stringify({
+   id:myId,name:myName,time:joinedAt
+  }),{retain:true,qos:0});
+ });
+
+ client.on("message",async(topic,payload)=>{
+  try{
+   const msg=payload.toString();
+
+   if(topic.startsWith(`${base}/presence/`)){
+    const id=topic.split("/").pop();
+
+    if(id===myId)return;
+
+    if(!msg){
+     removePeer(id);
+     updateStatus();
+     return;
+    }
+
+    const person=JSON.parse(msg);
+    if(peers[id])return;
+
+    const p=createPeer(person);
+
+    // 古い参加者が新しい参加者へ接続を開始
+    if(compare({id:myId,time:joinedAt},person)<0){
+     await makeOffer(p);
+    }
+
+    updateStatus();
+   }
+
+   if(topic===`${base}/signal/${myId}`){
+    const packet=JSON.parse(msg);
+    await handleSignal(packet.from,packet.data);
+   }
+  }catch(e){console.error(e)}
+ });
+
+ client.on("error",e=>{
+  $("status").textContent="MQTTエラー: "+e.message;
+ });
+
+ client.on("offline",()=>{
+  $("status").textContent="MQTT再接続中...";
+ });
+
+ }catch(e){
+  alert("カメラを使用できません: "+e.message);
+ }
+}
+
+function createPeer(person){
+ const p=new RTCPeerConnection(ICE);
+
+ const peer={
+  pc:p,
+  person,
+  candidates:[],
+  makingOffer:false
+ };
+
+ peers[person.id]=peer;
+
+ stream.getTracks().forEach(t=>p.addTrack(t,stream));
+
+ p.onicecandidate=e=>{
+  if(e.candidate){
+   send(person.id,{type:"candidate",candidate:e.candidate});
+  }
+ };
+
+ p.ontrack=e=>{
+  let card=$("v"+person.id);
+
+  if(!card){
+   card=document.createElement("div");
+   card.className="card";
+   card.id="v"+person.id;
+
+   const video=document.createElement("video");
+   video.autoplay=true;
+   video.playsInline=true;
+
+   const label=document.createElement("div");
+   label.className="name";
+   label.textContent=person.name||"参加者";
+
+   card.append(video,label);
+   $("videos").append(card);
+  }
+
+  const v=card.querySelector("video");
+  if(!v.srcObject)v.srcObject=e.streams[0];
+ };
+
+ p.onconnectionstatechange=()=>{
+  if(p.connectionState==="failed"||
+     p.connectionState==="closed"){
+   removePeer(person.id);
+  }
+  updateStatus();
+ };
+
+ return peer;
+}
+
+async function makeOffer(peer){
+ const p=peer.pc;
+ try{
+  peer.makingOffer=true;
+  const offer=await p.createOffer();
+  await p.setLocalDescription(offer);
+  send(peer.person.id,{
+   type:"offer",description:p.localDescription
+  });
+ }catch(e){console.error(e)}
+ finally{peer.makingOffer=false}
+}
+
+async function handleSignal(from,data){
+ let peer=peers[from];
+
+ if(!peer){
+  return;
+ }
+
+ const p=peer.pc;
+
+ try{
+  if(data.type==="offer"){
+   await p.setRemoteDescription(data.description);
+
+   const answer=await p.createAnswer();
+   await p.setLocalDescription(answer);
+
+   send(from,{
+    type:"answer",description:p.localDescription
+   });
+
+   await flush(peer);
+  }
+
+  if(data.type==="answer"){
+   await p.setRemoteDescription(data.description);
+   await flush(peer);
+  }
+
+  if(data.type==="candidate"){
+   if(p.remoteDescription){
+    await p.addIceCandidate(data.candidate);
+   }else{
+    peer.candidates.push(data.candidate);
+   }
+  }
+ }catch(e){console.error("WebRTC:",e)}
+}
+
+async function flush(peer){
+ for(const c of peer.candidates){
+  await peer.pc.addIceCandidate(c);
+ }
+ peer.candidates=[];
+}
+
+function removePeer(id){
+ const peer=peers[id];
+ if(peer){
+  peer.pc.close();
+  delete peers[id];
+ }
+ const card=$("v"+id);
+ if(card)card.remove();
+ updateStatus();
+}
+
+function updateStatus(){
+ $("status").textContent=
+ "参加人数: "+(Object.keys(peers).length+1)+"人";
+}
+
+function toggleMic(){
+ micOn=!micOn;
+ stream.getAudioTracks().forEach(t=>t.enabled=micOn);
+ $("mic").textContent=micOn?"🎤 マイク":"🔇 ミュート";
+}
+
+function toggleCam(){
+ camOn=!camOn;
+ stream.getVideoTracks().forEach(t=>t.enabled=camOn);
+ $("cam").textContent=camOn?"📷 カメラ":"🚫 カメラOFF";
+}
+
+function leave(){
+ if(client&&client.connected){
+  client.publish(`minizoom/${room}/presence/${myId}`,"",{retain:true});
+  client.end();
+ }
+
+ Object.keys(peers).forEach(removePeer);
+
+ if(stream)stream.getTracks().forEach(t=>t.stop());
+
+ location.reload();
+}
+</script>
+</body>
+</html>
