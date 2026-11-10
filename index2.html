@@ -6,47 +6,29 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Mini Zoom</title>
 <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
-<style>
-body{margin:0;background:#18191c;color:white;font-family:Arial;text-align:center}
-header{padding:15px;background:#25262c;color:#4b9cff;font-size:22px;font-weight:bold}
-main{padding:15px 15px 100px}
-input,button{padding:12px;margin:5px;border:0;border-radius:7px}
-input{background:#30323a;color:white}
-button{background:#2878ed;color:white;cursor:pointer}
-.red{background:#d93636}
-#videos{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-top:20px}
-.card{position:relative;aspect-ratio:16/9;background:#292b31;border-radius:10px;overflow:hidden}
-video{width:100%;height:100%;object-fit:contain;background:#111}
-.name{position:absolute;bottom:8px;left:8px;background:#0009;padding:6px;border-radius:5px}
-#controls{position:fixed;bottom:0;left:0;width:100%;background:#25262c;padding:10px;box-sizing:border-box}
-[hidden]{display:none!important}
-#status{color:#aaa;margin:12px}
-</style>
 </head>
 <body>
-<header>Mini Zoom P2P</header>
-<main>
+
+<h1>Mini Zoom</h1>
+
 <div id="join">
-<h2>会議に参加</h2>
-<input id="username" placeholder="名前">
-<input id="roomid" value="123456" placeholder="ルームID">
-<br><button onclick="join()">参加する</button>
+  <input id="username" placeholder="名前">
+  <input id="roomid" value="123456" placeholder="ルームID">
+  <button onclick="join()">参加する</button>
 </div>
+
 <div id="meeting" hidden>
-<div id="status">接続中...</div>
-<div id="videos">
-<div class="card">
-<video id="local" autoplay muted playsinline></video>
-<div class="name" id="myname">自分</div>
+  <p id="status">接続中...</p>
+  <h3>自分</h3>
+  <video id="local" autoplay muted playsinline width="320"></video>
+  <div id="videos"></div>
 </div>
-</div>
-</div>
-</main>
+
 <div id="controls" hidden>
-<button id="mic" onclick="toggleMic()">🎤 マイク</button>
-<button id="cam" onclick="toggleCam()">📷 カメラ</button>
-<button id="share" onclick="shareScreen()">🖥 画面共有</button>
-<button class="red" onclick="leave()">☎ 退室</button>
+  <button onclick="toggleMic()" id="mic">マイクON</button>
+  <button onclick="toggleCam()" id="cam">カメラON</button>
+  <button onclick="shareScreen()" id="share">画面共有</button>
+  <button onclick="leave()">退室</button>
 </div>
 
 <script>
@@ -69,109 +51,102 @@ function publishPresence(){
  JSON.stringify({id:myId,name:myName,time:joinedAt}),
  {retain:true});
 }
-
-async function join(){
- myName=$("username").value.trim()||"Guest";
- room=$("roomid").value.trim();
- if(!room)return alert("ルームIDを入力");
- try{
- stream=await navigator.mediaDevices.getUserMedia({video:true,audio:true});
- $("local").srcObject=stream;
- $("myname").textContent=myName;
- $("join").hidden=true;
- $("meeting").hidden=false;
- $("controls").hidden=false;
-
- myId="u"+Math.random().toString(36).slice(2,14);
- joinedAt=Date.now();
- closed=false;
-
- client=mqtt.connect(BROKER,{
- clientId:"mz"+myId,
- clean:true,
- connectTimeout:10000,
- reconnectPeriod:3000,
- will:{topic:topic(`presence/${myId}`),payload:"",retain:true}
- });
-
- client.on("connect",()=>{
-  if(closed)return;
-  $("status").textContent="MQTT接続済み・参加者検索中";
-  client.subscribe([topic("presence/+"),topic(`signal/${myId}`)],()=>{
-   publishPresence();
-  });
- });
-
- client.on("message",async(t,p)=>{
-  if(closed)return;
-  try{
-   const msg=p.toString();
-
-   if(t.startsWith(topic("presence/"))){
-    const id=t.split("/").pop();
-    if(id===myId)return;
-
-    if(!msg){
-     removePeer(id);
-     return;
-    }
-
-    const person=JSON.parse(msg);
-    if(!person.id||peers[id])return;
-
-    // 自分より古い参加者のみ接続開始
-    const peer=createPeer(person);
-    if(compare({id:myId,time:joinedAt},person)<0){
-     await makeOffer(peer);
-    }
-    updateStatus();
-   }
-
-   if(t===topic(`signal/${myId}`)){
-    const packet=JSON.parse(msg);
-    if(packet.from&&packet.data)
-    await handleSignal(packet.from,packet.data);
-   }
-  }catch(e){console.error(e)}
- });
-
- client.on("offline",()=>{
-  $("status").textContent="MQTT再接続中...";
- });
- client.on("error",e=>console.error(e));
- }catch(e){alert("カメラ・マイクエラー: "+e.message)}
-}
-
 function compare(a,b){
  return a.time-b.time||a.id.localeCompare(b.id);
 }
 
+async function join(){
+ myName=$("username").value.trim()||"Guest";
+ room=$("roomid").value.trim();
+ if(!room)return alert("ルームIDを入力してください");
+
+ try{
+  stream=await navigator.mediaDevices.getUserMedia({video:true,audio:true});
+  $("local").srcObject=stream;
+  $("join").hidden=true;
+  $("meeting").hidden=false;
+  $("controls").hidden=false;
+
+  myId="u"+Math.random().toString(36).slice(2,14);
+  joinedAt=Date.now();
+  closed=false;
+
+  client=mqtt.connect(BROKER,{
+   clientId:"mz"+myId,
+   clean:true,
+   connectTimeout:10000,
+   reconnectPeriod:3000,
+   will:{topic:topic(`presence/${myId}`),payload:"",retain:true}
+  });
+
+  client.on("connect",()=>{
+   if(closed)return;
+   $("status").textContent="MQTT接続済み";
+   client.subscribe([topic("presence/+"),topic(`signal/${myId}`)],publishPresence);
+  });
+
+  client.on("message",async(t,p)=>{
+   if(closed)return;
+   try{
+    const msg=p.toString();
+
+    if(t.startsWith(topic("presence/"))){
+     const id=t.split("/").pop();
+     if(id===myId)return;
+     if(!msg){removePeer(id);return}
+
+     const person=JSON.parse(msg);
+     if(!person.id||peers[id])return;
+
+     const peer=createPeer(person);
+     if(compare({id:myId,time:joinedAt},person)<0)
+      await makeOffer(peer);
+
+     updateStatus();
+    }
+
+    if(t===topic(`signal/${myId}`)){
+     const packet=JSON.parse(msg);
+     if(packet.from&&packet.data)
+      await handleSignal(packet.from,packet.data);
+    }
+   }catch(e){console.error(e)}
+  });
+
+  client.on("offline",()=>{
+   $("status").textContent="MQTT再接続中";
+  });
+
+ }catch(e){alert(e.message)}
+}
+
 function createPeer(person){
  const pc=new RTCPeerConnection(ICE);
- const peer={pc,person,candidates:[],makingOffer:false};
+ const peer={pc,person,candidates:[]};
  peers[person.id]=peer;
 
  stream.getTracks().forEach(t=>pc.addTrack(t,stream));
 
  pc.onicecandidate=e=>{
-  if(e.candidate)send(person.id,{type:"candidate",candidate:e.candidate});
+  if(e.candidate)
+   send(person.id,{type:"candidate",candidate:e.candidate});
  };
 
  pc.ontrack=e=>{
-  let card=$("v"+person.id);
-  if(!card){
-   card=document.createElement("div");
-   card.className="card";
-   card.id="v"+person.id;
-   const v=document.createElement("video");
-   v.autoplay=true;v.playsInline=true;
-   const n=document.createElement("div");
-   n.className="name";
-   n.textContent=person.name||"参加者";
-   card.append(v,n);
-   $("videos").append(card);
+  let v=$("video-"+person.id);
+  if(!v){
+   const div=document.createElement("div");
+   const label=document.createElement("p");
+   label.textContent=person.name||"参加者";
+   v=document.createElement("video");
+   v.id="video-"+person.id;
+   v.autoplay=true;
+   v.playsInline=true;
+   v.width=320;
+   div.append(label,v);
+   div.id="card-"+person.id;
+   $("videos").append(div);
   }
-  const v=card.querySelector("video");
   if(v.srcObject!==e.streams[0])v.srcObject=e.streams[0];
  };
 
@@ -185,18 +160,17 @@ function createPeer(person){
 
 async function makeOffer(peer){
  try{
-  peer.makingOffer=true;
   const offer=await peer.pc.createOffer();
   await peer.pc.setLocalDescription(offer);
   send(peer.person.id,{type:"offer",description:peer.pc.localDescription});
  }catch(e){console.error(e)}
- finally{peer.makingOffer=false}
 }
 
 async function handleSignal(from,data){
  const peer=peers[from];
  if(!peer)return;
  const pc=peer.pc;
+
  try{
   if(data.type==="offer"){
    await pc.setRemoteDescription(data.description);
@@ -214,7 +188,7 @@ async function handleSignal(from,data){
     await pc.addIceCandidate(data.candidate);
    else peer.candidates.push(data.candidate);
   }
- }catch(e){console.error("WebRTC",e)}
+ }catch(e){console.error(e)}
 }
 
 async function flush(peer){
@@ -224,97 +198,92 @@ async function flush(peer){
 }
 
 function removePeer(id){
- const peer=peers[id];
- if(peer){peer.pc.close();delete peers[id]}
- const card=$("v"+id);
+ if(peers[id]){
+  peers[id].pc.close();
+  delete peers[id];
+ }
+ const card=$("card-"+id);
  if(card)card.remove();
  updateStatus();
 }
 
 function updateStatus(){
- $("status").textContent=
- "参加人数: "+(Object.keys(peers).length+1)+"人";
+ $("status").textContent="参加人数: "+(Object.keys(peers).length+1)+"人";
 }
 
 function toggleMic(){
  micOn=!micOn;
  stream.getAudioTracks().forEach(t=>t.enabled=micOn);
- $("mic").textContent=micOn?"🎤 マイク":"🔇 ミュート";
+ $("mic").textContent=micOn?"マイクON":"マイクOFF";
 }
+
 function toggleCam(){
  camOn=!camOn;
  stream.getVideoTracks().forEach(t=>t.enabled=camOn);
- $("cam").textContent=camOn?"📷 カメラ":"🚫 カメラOFF";
+ $("cam").textContent=camOn?"カメラON":"カメラOFF";
 }
 
 async function shareScreen(){
  if(sharing){await stopShare();return}
  try{
-  screenStream=await navigator.mediaDevices.getDisplayMedia({
-   video:true,audio:true
-  });
+  screenStream=await navigator.mediaDevices.getDisplayMedia({video:true,audio:true});
   const track=screenStream.getVideoTracks()[0];
-  const changes=[];
+  const tasks=[];
 
   for(const id in peers){
    const sender=peers[id].pc.getSenders()
     .find(s=>s.track?.kind==="video");
-   if(sender)changes.push(sender.replaceTrack(track));
+   if(sender)tasks.push(sender.replaceTrack(track));
   }
-  await Promise.all(changes);
 
+  await Promise.all(tasks);
   $("local").srcObject=screenStream;
   sharing=true;
-  $("share").textContent="⏹ 共有終了";
+  $("share").textContent="共有終了";
   track.onended=()=>stopShare();
- }catch(e){
-  if(e.name!=="NotAllowedError")alert("画面共有エラー: "+e.message);
- }
+ }catch(e){console.error(e)}
 }
 
 async function stopShare(){
  if(!sharing)return;
  sharing=false;
  const track=stream.getVideoTracks()[0];
- const changes=[];
+ const tasks=[];
 
  for(const id in peers){
   const sender=peers[id].pc.getSenders()
    .find(s=>s.track?.kind==="video");
-  if(sender)changes.push(sender.replaceTrack(track));
+  if(sender)tasks.push(sender.replaceTrack(track));
  }
- await Promise.all(changes);
+ await Promise.all(tasks);
 
  if(screenStream){
   screenStream.getTracks().forEach(t=>t.stop());
   screenStream=null;
  }
  $("local").srcObject=stream;
- $("share").textContent="🖥 画面共有";
+ $("share").textContent="画面共有";
 }
 
 async function leave(){
  if(closed)return;
  closed=true;
-
  if(screenStream)screenStream.getTracks().forEach(t=>t.stop());
 
  if(client){
-  if(client.connected){
+  if(client.connected)
    client.publish(topic(`presence/${myId}`),"",{retain:true});
-  }
   client.end(true);
  }
 
- Object.keys(peers).forEach(id=>removePeer(id));
+ Object.keys(peers).forEach(removePeer);
  if(stream)stream.getTracks().forEach(t=>t.stop());
  location.reload();
 }
 
 window.addEventListener("beforeunload",()=>{
- if(client&&client.connected){
+ if(client&&client.connected)
   client.publish(topic(`presence/${myId}`),"",{retain:true});
- }
 });
 </script>
 </body>
